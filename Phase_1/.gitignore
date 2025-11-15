@@ -1,0 +1,12 @@
+@"
+# Python / notebooks
+__pycache__/
+*.py[cod]
+*.ipynb_checkpoints/
+.DS_Store
+
+# Data hygiene
+data/raw/*
+outputs/visuals/*
+outputs/temp/*
+"@ | Set-Content ".\.gitignore"

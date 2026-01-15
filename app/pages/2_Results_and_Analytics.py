@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import sys
 
 import numpy as np
 import pandas as pd
@@ -12,48 +12,66 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-from vero_engine import VEROEngine
-from pdf_report import PDFInputs, build_vero_pdf
-
-
-# ----------------------------
-# Path bootstrap
-# ----------------------------
+# ------------------------------------------------------------------------------
+# Path bootstrap (do this early)
+# ------------------------------------------------------------------------------
 APP_DIR = Path(__file__).resolve().parents[1]  # app/
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+from vero_engine import VEROEngine  # noqa: E402
+from pdf_report import PDFInputs, build_vero_pdf  # noqa: E402
+from ui_theme import apply_bioergotech_theme  # noqa: E402
 
-# ----------------------------
-# Safety
-# ----------------------------
-if sys.version_info < (3, 10):
-    st.error("Please use Python 3.10+")
-    st.stop()
+# ------------------------------------------------------------------------------
+# Streamlit config (ONLY ONCE)
+# ------------------------------------------------------------------------------
+st.set_page_config(
+    page_title="VERO - Results & Visual Analytics",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-st.set_page_config(page_title="VERO - Results & Visual Analytics", layout="wide")
+ASSETS = Path(__file__).resolve().parents[1] / "assets"
+apply_bioergotech_theme(
+    assets_dir=ASSETS,
+    sidebar_title="VERO Risk Calculator",
+    sidebar_subtitle="Results & Visual Analytics",
+)
 
+# ------------------------------------------------------------------------------
+# Page-specific CSS (light, non-conflicting)
+# ------------------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+      .section-title {
+        font-size: 1.05rem;
+        font-weight: 800;
+        color: rgba(0,0,0,0.75);
+        margin-top: 0.6rem;
+      }
+      .stButton > button {
+        border-radius: 12px;
+        height: 46px;
+        font-weight: 800;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# ----------------------------
-# Paths
-# ----------------------------
-HERE = Path(__file__).resolve().parent.parent  # app/
+# ------------------------------------------------------------------------------
+# Paths to artifacts
+# ------------------------------------------------------------------------------
+HERE = Path(__file__).resolve().parents[1]
 BASE_MODEL = HERE / "vero_base_model_prefit.joblib"
 CALIBRATOR = HERE / "vero_calibrator_prefit.joblib"
 META = HERE / "vero_metadata.json"
 
-
-# ----------------------------
-# Engine loader
-# ----------------------------
-@st.cache_resource
-def load_engine() -> VEROEngine:
-    return VEROEngine(BASE_MODEL, CALIBRATOR, META)
-
-
-# ----------------------------
-# Timeline columns (ONLY these)
-# ----------------------------
+# ------------------------------------------------------------------------------
+# Timeline columns (STRICT, per your instruction)
+# ------------------------------------------------------------------------------
 TIMELINE_COLS = [
     "observation_start_date",
     "observation_end_date",
@@ -74,16 +92,21 @@ TIMELINE_LABELS = {
     "radiotherapy_end_date": "Radiotherapy end",
 }
 
+# ------------------------------------------------------------------------------
+# Engine loader
+# ------------------------------------------------------------------------------
+@st.cache_resource
+def load_engine() -> VEROEngine:
+    return VEROEngine(BASE_MODEL, CALIBRATOR, META)
 
-# ----------------------------
+# ------------------------------------------------------------------------------
 # Helpers
-# ----------------------------
+# ------------------------------------------------------------------------------
 def pretty_label(code: str) -> str:
     return str(code).replace("_", " ").strip().title()
 
-
 def derive_age_group(age_value: Any) -> Optional[str]:
-    if age_value is None:
+    if age_value is None or age_value == "":
         return None
     try:
         a = float(age_value)
@@ -91,31 +114,37 @@ def derive_age_group(age_value: Any) -> Optional[str]:
         return None
     return "<= 65 years" if a <= 65 else "> 65 years"
 
-
 def clip_for_display(prob: float) -> float:
     eps = 1e-6
     p = float(prob)
     return float(min(max(p, eps), 1 - eps))
 
-
-def phenotype_membership_label(prob: float, threshold: float = 0.5) -> str:
-    return "Accelerated aging / frailty" if prob >= threshold else "Non-accelerated / lower frailty"
-
+def fmt_prob(p: float) -> str:
+    try:
+        p = float(p)
+    except Exception:
+        return "-"
+    if np.isnan(p):
+        return "-"
+    if p == 0.0:
+        return "≈ 0 (very small)"
+    if p < 0.001:
+        return f"{p:.2e}"
+    return f"{p:.6f}"
 
 def risk_badge(stratum: str) -> str:
     color = {"Low": "#2e7d32", "Medium": "#ed6c02", "High": "#d32f2f"}.get(stratum, "#444")
     return f"""
-    <div style="display:inline-block;padding:7px 14px;border-radius:999px;
-                background:{color};color:white;font-weight:800;">
+    <div style="display:inline-block;padding:8px 14px;border-radius:999px;
+                background:{color};color:white;font-weight:900;">
         {stratum} Risk
     </div>
     """
 
-
 def safe_to_date(x: Any) -> Optional[date]:
     """
-    Convert values to python date safely.
-    - IMPORTANT: avoids turning non-date numeric fields into 1970-01-01
+    Convert input to python date safely.
+    Prevents numeric values being interpreted as epoch dates.
     """
     if x is None or x is pd.NaT:
         return None
@@ -126,14 +155,11 @@ def safe_to_date(x: Any) -> Optional[date]:
         pass
 
     if isinstance(x, pd.Timestamp):
-        if pd.isna(x):
-            return None
-        return x.date()
+        return None if pd.isna(x) else x.date()
 
     if isinstance(x, date):
         return x
 
-    # guard: prevent numeric-only values (cycles, status codes) from being coerced to epoch
     if isinstance(x, (int, float, np.integer, np.floating)):
         return None
 
@@ -141,55 +167,57 @@ def safe_to_date(x: Any) -> Optional[date]:
     if s == "":
         return None
 
-    # parse as datetime
     dt = pd.to_datetime(s, errors="coerce")
     if pd.isna(dt):
         return None
     return dt.date()
 
+def build_timeline_events(
+    timeline_record: Dict[str, Any],
+    patient_record: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    STRICT timeline builder:
+    - only uses TIMELINE_COLS
+    - pulls from timeline_record first, then patient_record
+    """
+    primary = timeline_record or {}
+    fallback = patient_record or {}
 
-def fmt_prob(p: float) -> str:
-    try:
-        p = float(p)
-    except Exception:
-        return "-"
+    events: List[Dict[str, Any]] = []
+    for col in TIMELINE_COLS:
+        v = primary.get(col, None)
+        if v is None:
+            v = fallback.get(col, None)
+        d = safe_to_date(v)
+        if d is None:
+            continue
+        events.append(
+            {"event": TIMELINE_LABELS.get(col, pretty_label(col)), "date": d}
+        )
 
-    if np.isnan(p):
-        return "-"
-    if p == 0.0:
-        return "≈ 0 (very small)"
-    if p < 0.001:
-        return f"{p:.2e}"
-    return f"{p:.6f}"
+    events.sort(key=lambda x: x["date"])
+    return events
 
-
-def make_membership_gauge(prob_display: float) -> go.Figure:
+def make_probability_gauge(prob_display: float, title: str) -> go.Figure:
     fig = go.Figure(
         go.Indicator(
             mode="gauge+number",
             value=float(prob_display),
             number={"valueformat": ".4f"},
             gauge={"axis": {"range": [0, 1]}},
-            title={"text": "Membership probability (used for score)"},
+            title={"text": title},
         )
     )
-    fig.update_layout(height=250, margin=dict(l=10, r=10, t=40, b=10))
+    fig.update_layout(height=260, margin=dict(l=10, r=10, t=50, b=10))
     return fig
 
-
 def make_timeline_figure(events: List[Dict[str, Any]]) -> go.Figure:
-    """
-    Clean timeline:
-    - uses only the curated date columns
-    - distributes events across multiple y lanes (not just 0/1)
-    """
-    ev_df = pd.DataFrame(events).copy()
-    ev_df = ev_df.dropna(subset=["date"]).sort_values("date")
-
+    ev_df = pd.DataFrame(events).dropna(subset=["date"]).sort_values("date")
     if ev_df.empty:
         return go.Figure()
 
-    lanes = min(4, max(1, len(ev_df)))  # up to 4 lanes
+    lanes = min(4, max(1, len(ev_df)))
     y = [i % lanes for i in range(len(ev_df))]
 
     fig = go.Figure()
@@ -205,7 +233,6 @@ def make_timeline_figure(events: List[Dict[str, Any]]) -> go.Figure:
         )
     )
 
-    # base line across the full span
     fig.add_shape(
         type="line",
         x0=min(ev_df["date"]),
@@ -217,50 +244,12 @@ def make_timeline_figure(events: List[Dict[str, Any]]) -> go.Figure:
 
     fig.update_yaxes(visible=False, range=[-0.8, lanes - 0.2])
     fig.update_xaxes(tickformat="%b %Y", tickangle=-25, showgrid=True, title="Date")
-    fig.update_layout(height=320, margin=dict(l=20, r=20, t=30, b=20), showlegend=False)
+    fig.update_layout(height=340, margin=dict(l=20, r=20, t=30, b=20), showlegend=False)
     return fig
 
-
-def build_timeline_events(timeline_record: Dict[str, Any], patient_record: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    STRICT timeline builder:
-    - only uses the exact columns you listed
-    - pulls from timeline_record first, then patient_record as fallback
-    - filters out non-dates, avoids 1970 artifacts
-    """
-    primary = timeline_record or {}
-    fallback = patient_record or {}
-
-    events: List[Dict[str, Any]] = []
-    for col in TIMELINE_COLS:
-        v = primary.get(col, None)
-        if v is None:
-            v = fallback.get(col, None)
-
-        d = safe_to_date(v)
-        if d is None:
-            continue
-
-        label = TIMELINE_LABELS.get(col, pretty_label(col))
-        events.append({"event": label, "date": d})
-
-    events.sort(key=lambda x: x["date"])
-    return events
-
-
-# ----------------------------
-# Styling
-# ----------------------------
-st.markdown(
-    """
-<style>
-.block-container {padding-top: 1.0rem; max-width: 1200px;}
-.stButton>button {border-radius: 12px; height: 44px; font-weight: 800;}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
+# ------------------------------------------------------------------------------
+# Page header + sidebar utilities
+# ------------------------------------------------------------------------------
 st.title("Results & Visual Analytics")
 
 with st.sidebar:
@@ -269,10 +258,9 @@ with st.sidebar:
         st.cache_resource.clear()
         st.rerun()
 
-
-# ----------------------------
+# ------------------------------------------------------------------------------
 # Load engine + session input
-# ----------------------------
+# ------------------------------------------------------------------------------
 engine = load_engine()
 FEATURE_COLS = engine.feature_cols
 
@@ -282,6 +270,7 @@ if "patient_record" not in st.session_state:
 
 patient: Dict[str, Any] = dict(st.session_state["patient_record"])
 selected_id = st.session_state.get("selected_patient_id", None)
+timeline_record = st.session_state.get("timeline_record", {}) or {}
 
 if "age_group" in FEATURE_COLS:
     patient["age_group"] = derive_age_group(patient.get("age"))
@@ -293,6 +282,9 @@ eth_val = patient.get("ethnicity")
 edu_val = patient.get("education_level")
 emp_val = patient.get("employment_status")
 
+# ------------------------------------------------------------------------------
+# Patient summary
+# ------------------------------------------------------------------------------
 with st.expander("Patient summary (display only)", expanded=True):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Patient ID", selected_id or "(manual)")
@@ -312,19 +304,17 @@ with st.expander("Patient summary (display only)", expanded=True):
 
 st.divider()
 
-
-# ----------------------------
-# Compute button
-# ----------------------------
+# ------------------------------------------------------------------------------
+# Compute
+# ------------------------------------------------------------------------------
 compute = st.button("Compute VERO", type="primary", use_container_width=True)
 if not compute:
     st.info("Click Compute VERO to generate score, contributors, timeline, and PDF.")
     st.stop()
 
-
-# ----------------------------
+# ------------------------------------------------------------------------------
 # Predict
-# ----------------------------
+# ------------------------------------------------------------------------------
 try:
     res = engine.predict_single(patient)
 except Exception as e:
@@ -333,58 +323,54 @@ except Exception as e:
 
 p_base = float(res.base_probability)
 p_cal = float(res.calibrated_probability)
-p_used = float(res.probability_used_for_score)
+p_score = float(res.probability_used_for_score)
 
 score = int(res.vero_score)
 stratum = str(res.risk_stratum)
 
-p_used_disp = clip_for_display(p_used)
+# Display decisions
+threshold = 0.5
+screen_positive = p_score >= threshold
+membership_label = "Accelerated aging / frailty" if screen_positive else "Non-accelerated / lower frailty"
+
+p_score_disp = clip_for_display(p_score)
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Probability used for score", fmt_prob(p_used))
+m1.metric("Probability used for score", fmt_prob(p_score))
 m2.metric("Calibrated probability", fmt_prob(p_cal))
 m3.metric("Base probability", fmt_prob(p_base))
 m4.markdown(risk_badge(stratum), unsafe_allow_html=True)
 
 st.divider()
 
-
-# ----------------------------
+# ------------------------------------------------------------------------------
 # Membership panel
-# ----------------------------
-threshold = 0.5
-membership_label = phenotype_membership_label(p_used, threshold=threshold)
-
+# ------------------------------------------------------------------------------
 left, right = st.columns([0.55, 0.45], gap="large")
 with left:
     st.subheader("Phenotype membership")
+    st.write(f"**Decision rule:** positive if probability ≥ {threshold:.2f}")
     st.write(f"**Predicted membership:** {membership_label}")
-    st.progress(p_used_disp)
+    st.progress(p_score_disp)
     st.caption("Progress bar uses probability used for scoring (clipped only for UI).")
 
 with right:
-    gauge_fig = make_membership_gauge(p_used_disp)
+    gauge_fig = make_probability_gauge(p_score_disp, title="Membership probability")
     st.plotly_chart(gauge_fig, use_container_width=True)
 
 st.divider()
 
-
-# ----------------------------
-# Timeline (STRICT FIX)
-# ----------------------------
+# ------------------------------------------------------------------------------
+# Timeline
+# ------------------------------------------------------------------------------
 st.subheader("Patient timeline")
 
-timeline_record = st.session_state.get("timeline_record", {}) or {}
+events = build_timeline_events(timeline_record=timeline_record, patient_record=patient)
 
-events = build_timeline_events(
-    timeline_record=timeline_record,
-    patient_record=patient,
-)
-
-timeline_fig = None
+timeline_fig: Optional[go.Figure] = None
 if not events:
     st.info("No usable timeline dates found for this patient.")
-    with st.expander("Debug: timeline raw values (current patient)", expanded=False):
+    with st.expander("Debug: timeline raw values", expanded=False):
         st.write({k: timeline_record.get(k, None) for k in TIMELINE_COLS})
 else:
     timeline_fig = make_timeline_figure(events)
@@ -393,17 +379,17 @@ else:
 
 st.divider()
 
-
-# ----------------------------
-# Contributors: TOP 10
-# ----------------------------
+# ------------------------------------------------------------------------------
+# Contributors
+# ------------------------------------------------------------------------------
 TOP_K = 10
+st.subheader(f"Top {TOP_K} contributors")
+
 topk = engine.top_contributors_single(patient, top_k=TOP_K).copy()
 topk["feature_code"] = topk["base_feature"]
 topk["feature_label"] = topk["base_feature"].apply(pretty_label)
 topk = topk[["feature_code", "feature_label", "total_contribution"]].reset_index(drop=True)
 
-st.subheader(f"Top {TOP_K} contributors")
 st.dataframe(topk, use_container_width=True, hide_index=True)
 
 contrib_fig = px.bar(
@@ -413,20 +399,18 @@ contrib_fig = px.bar(
     orientation="h",
     title=f"Top {TOP_K} contributors (signed contribution)",
 )
-contrib_fig.update_layout(height=max(420, 60 + 30 * len(topk)))
+contrib_fig.update_layout(height=max(420, 70 + 32 * len(topk)))
 st.plotly_chart(contrib_fig, use_container_width=True)
 
 st.divider()
 
-
-# ----------------------------
+# ------------------------------------------------------------------------------
 # Export PDF
-# ----------------------------
+# ------------------------------------------------------------------------------
 st.subheader("Export")
-notes = st.text_area("Clinical notes (optional, for PDF)", value="", height=90)
+notes = st.text_area("Clinical notes (optional, for PDF)", value="", height=95)
 
-# IMPORTANT: Kaleido needed on Streamlit Cloud for Plotly -> PNG
-# Add "kaleido" to requirements.txt (recommended), not pip-install in runtime.
+# Convert charts to PNG for PDF (requires kaleido)
 try:
     contrib_png = pio.to_image(contrib_fig, format="png", scale=2)
     gauge_png = pio.to_image(gauge_fig, format="png", scale=2)
@@ -446,8 +430,8 @@ pdf_inputs = PDFInputs(
     ethnicity=eth_val,
     education_level=edu_val,
     employment_status=emp_val,
-    vero_probability=float(p_used),
-    vero_probability_display=float(p_used_disp),
+    vero_probability=float(p_score),
+    vero_probability_display=float(p_score_disp),
     vero_score=int(score),
     risk_stratum=stratum,
     fields_provided=fields_provided,
@@ -471,4 +455,15 @@ st.download_button(
     file_name=f"vero_summary_{selected_id or 'patient'}.pdf",
     mime="application/pdf",
     use_container_width=True,
+)
+
+
+pdf_bytes = build_vero_pdf(
+    summary=pdf_inputs,
+    top_contributors=topk,
+    contrib_bar_png_bytes=contrib_png,
+    gauge_png_bytes=gauge_png,
+    timeline_png_bytes=timeline_png,
+    timeline_events=events,
+    assets_dir=ASSETS,   
 )
